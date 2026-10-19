@@ -4,6 +4,8 @@ Strips ads and bloat from an Amazon Fire TV and replaces the home screen with a 
 launcher: a full-screen rotating photo wallpaper, a small clock and greeting, and a frosted dock of
 streaming apps. Everything is done over Wi-Fi with `adb`, with no root, and everything can be undone.
 
+![The launcher running on the TV: greeting and clock top-left, Inputs and Settings pills top-right, a Bing photo-of-the-day wallpaper, and a frosted dock of Netflix, YouTube, Prime Video, Disney+ and Max](docs/home-screen.jpg)
+
 Built for and tested on an **Insignia NS-55F501NA22** (Amazon `AFTDCT31`, Fire OS 7.7.0.8 / Android 9).
 Other Fire OS 7 TVs should work the same way; package names may differ slightly.
 
