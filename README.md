@@ -86,6 +86,9 @@ to third-party accessibility services. So:
   (retrying until the lock lifts), and when the activity appears it takes over the overlay's exact
   focus and scroll position and the overlay disappears. The overlay steps aside for anything else
   (apps, Settings, the screensaver) and never stays longer than 12 s.
+- **Standby**: Fire OS quietly brings its own home to the front a couple of seconds after the TV
+  goes into standby. The service puts the launcher back on top while the screen is still dark, so
+  the TV wakes straight into it (with an overlay check just after wake as a backup).
 - **Settings** opens Amazon's settings grid (`MainSettingsActivity`), which the redirect leaves alone.
 - **Inputs**: Amazon's Inputs screen and HDMI switching need Amazon-signed permissions, so the
   Inputs pill opens the settings grid and the service clicks its *Inputs* tile for you.

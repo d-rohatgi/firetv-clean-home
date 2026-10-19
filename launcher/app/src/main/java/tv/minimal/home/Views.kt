@@ -102,6 +102,8 @@ class AppTile(context: Context, val app: AppEntry, cornerDp: Float) : View(conte
     }
 
     override fun onDraw(c: Canvas) {
+        // Shaders are created in onSizeChanged, which never runs for a tile that hasn't been sized yet.
+        if (width == 0 || height == 0 || sheenPaint.shader == null) return
         val w = width.toFloat()
         val h = height.toFloat()
         val banner = app.banner

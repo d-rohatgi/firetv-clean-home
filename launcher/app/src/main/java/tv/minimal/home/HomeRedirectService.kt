@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.view.ContextThemeWrapper
 import android.view.View
@@ -64,8 +65,46 @@ class HomeRedirectService : AccessibilityService() {
         }
     }
 
+    private val powerManager by lazy { getSystemService(Context.POWER_SERVICE) as PowerManager }
+    private var dreaming = false
+
+    /**
+     * Fire OS brings Amazon's home to the front a moment after the TV goes into standby, so on
+     * wake it would already be showing — and with no new window appearing, nothing would trigger
+     * the redirect. Put the launcher back on top while the screen is still off instead.
+     */
+    private val homeWhileAsleep = Runnable {
+        if (!powerManager.isInteractive && !MainActivity.visible) goHome(this)
+    }
+
+    /** Backup for the above: just after waking, if Amazon's home is showing anyway, cover it. */
+    private val checkAfterWake = Runnable {
+        if (!MainActivity.visible && rootInActiveWindow?.packageName?.toString() == AMAZON_LAUNCHER) {
+            amazonHomeInFront = true
+            redirect()
+        }
+    }
+
     private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = hideOverlay()
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    hideOverlay()
+                    handler.removeCallbacks(checkAfterWake)
+                    handler.removeCallbacks(homeWhileAsleep)
+                    handler.postDelayed(homeWhileAsleep, ASLEEP_HOME_DELAY_MS)
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    handler.removeCallbacks(homeWhileAsleep)
+                    handler.postDelayed(checkAfterWake, 1200)
+                }
+                Intent.ACTION_DREAMING_STARTED -> {
+                    dreaming = true
+                    hideOverlay()
+                }
+                Intent.ACTION_DREAMING_STOPPED -> dreaming = false
+            }
+        }
     }
 
     override fun onServiceConnected() {
@@ -74,9 +113,12 @@ class HomeRedirectService : AccessibilityService() {
         Apps.watch(this)
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_DREAMING_STARTED)
+            addAction(Intent.ACTION_DREAMING_STOPPED)
         })
         handler.postDelayed({ overlayView() }, 3000) // build ahead of time so the first Home is instant
+        handler.postDelayed(checkAfterWake, 2000) // (re)started while Amazon's home is showing? cover it
     }
 
     override fun onDestroy() {
@@ -88,23 +130,35 @@ class HomeRedirectService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName || pkg == SYSTEM_UI) return // our own windows, volume bar etc.
+
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            // Self-healing: Amazon's home is visibly updating and nothing is covering it — e.g. Home
+            // was pressed while it was already in front, which opens no new window.
+            if (pkg == AMAZON_LAUNCHER && amazonHomeInFront && !overlayShown && !MainActivity.visible) redirect()
+            return
+        }
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val cls = event.className?.toString() ?: return
-        val now = SystemClock.uptimeMillis()
         amazonHomeInFront = pkg == AMAZON_LAUNCHER && cls.startsWith(AMAZON_HOME_PREFIX)
 
         if (!amazonHomeInFront) {
             hideOverlay()
-            if (cls == AMAZON_SETTINGS && now < pendingInputsClickUntil) {
+            if (cls == AMAZON_SETTINGS && SystemClock.uptimeMillis() < pendingInputsClickUntil) {
                 pendingInputsClickUntil = 0
                 handler.postDelayed({ clickInputsTile(0) }, 250)
             }
             return
         }
+        redirect()
+    }
 
+    /** Cover Amazon's home with the overlay right away and bring up the launcher activity. */
+    private fun redirect() {
+        if (dreaming || !powerManager.isInteractive) return // never cover the screensaver or a dark screen
         showOverlay()
+        val now = SystemClock.uptimeMillis()
         if (now - lastRedirect < 700) return
         lastRedirect = now
         retries = 0
@@ -184,6 +238,7 @@ class HomeRedirectService : AccessibilityService() {
         private const val RETRY_MS = 1500L
         private const val MAX_RETRIES = 6 // outlasts Android's 5-second app-switch lock
         private const val OVERLAY_MAX_MS = 12_000L
+        private const val ASLEEP_HOME_DELAY_MS = 4_500L // after Fire OS's own go-home on standby
         const val AMAZON_SETTINGS = "com.amazon.tv.launcher.ui.MainSettingsActivity"
 
         /** The running service (same process as the activity), for the overlay hand-off. */
