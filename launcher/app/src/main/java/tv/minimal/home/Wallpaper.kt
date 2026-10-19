@@ -21,30 +21,30 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Full-screen rotating wallpaper. Sources, in priority order:
+ * Rotating wallpaper shared by every home screen in the process (the launcher activity and the
+ * instant overlay), so both always show the same photo. Sources, in priority order:
  *  1. your own photos in /sdcard/Android/data/tv.minimal.home/files/wallpapers (`adb push`),
  *  2. Bing's photos of the day (fetched by [BingPhotos] at most twice a day),
  *  3. soft generated landscapes (offline fallback).
- * Images are decoded off the UI thread and crossfaded so focus animations never stutter.
+ * Images are decoded off the UI thread so focus animations never stutter.
  */
-class Wallpaper(private val context: Context) {
-    /** Called with the photo's caption ("Place (© Credit)") whenever a new image fades in. */
-    var onCaption: ((String?) -> Unit)? = null
+object WallpaperEngine {
+    class Frame(val bitmap: Bitmap, val caption: String?)
 
-    val view = FrameLayout(context)
-    private val layers = List(2) {
-        ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            alpha = 0f
-            view.addView(this, FrameLayout.LayoutParams(-1, -1))
-        }
-    }
+    /** The photo currently on screen; kept while nothing is attached so the next view shows it instantly. */
+    var current: Frame? = null
+        private set
+
     private class Source(val caption: String?, val load: () -> Bitmap?)
 
+    private const val INTERVAL_MS = 3 * 60 * 1000L
+    private val EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
+
+    private lateinit var app: Context
+    private val listeners = LinkedHashSet<(Frame, Long) -> Unit>()
     private val worker = Executors.newSingleThreadExecutor()
     private val network = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
-    private var front = -1
     private var sources: List<Source> = emptyList()
     private var signature = ""
     private var index = 0
@@ -56,29 +56,31 @@ class Wallpaper(private val context: Context) {
         }
     }
 
-    val folder: File? get() = context.getExternalFilesDir("wallpapers")
-
-    fun start() {
-        reloadSources()
-        refreshBing()
-        main.removeCallbacks(rotate)
-        main.postDelayed(rotate, INTERVAL_MS)
+    /** Starts delivering frames to [listener] (immediately with the current one, without a fade). */
+    fun attach(context: Context, listener: (Frame, Long) -> Unit) {
+        app = context.applicationContext
+        listeners += listener
+        current?.let { listener(it, 0L) }
+        if (listeners.size == 1) {
+            reloadSources()
+            refreshBing()
+            main.removeCallbacks(rotate)
+            main.postDelayed(rotate, INTERVAL_MS)
+        }
     }
 
-    fun stop() = main.removeCallbacks(rotate)
-
-    fun shutdown() {
-        stop()
-        worker.shutdownNow()
-        network.shutdownNow()
+    fun detach(listener: (Frame, Long) -> Unit) {
+        listeners -= listener
+        if (listeners.isEmpty()) main.removeCallbacks(rotate)
     }
 
     /** Rebuilds the playlist if the available photos changed, and shows its first image. */
     private fun reloadSources() {
-        val dm = context.resources.displayMetrics
+        val dm = app.resources.displayMetrics
         val decode = { f: File -> decodeScaled(f, dm.widthPixels, dm.heightPixels) }
-        val own = folder?.listFiles { f -> f.extension.lowercase() in EXTENSIONS }.orEmpty().sortedBy { it.name }
-        val bing = if (own.isEmpty()) BingPhotos.cached(context) else emptyList()
+        val own = app.getExternalFilesDir("wallpapers")
+            ?.listFiles { f -> f.extension.lowercase() in EXTENSIONS }.orEmpty().sortedBy { it.name }
+        val bing = if (own.isEmpty()) BingPhotos.cached(app) else emptyList()
         val sig = own.joinToString { it.name + it.length() } + "|" + bing.joinToString { it.file.name }
         if (sig == signature && sources.isNotEmpty()) return
         signature = sig
@@ -90,12 +92,12 @@ class Wallpaper(private val context: Context) {
             else -> PALETTES.shuffled().map { p -> Source(null) { paint(p) } }
         }
         index = 0
-        next(fade = if (front < 0) 700 else 2000)
+        next(fade = if (current == null) 700 else 2000)
     }
 
     private fun refreshBing() {
         network.execute {
-            if (BingPhotos.refreshIfStale(context)) main.post { reloadSources() }
+            if (BingPhotos.refreshIfStale(app)) main.post { reloadSources() }
         }
     }
 
@@ -104,21 +106,12 @@ class Wallpaper(private val context: Context) {
         val source = sources[index++ % sources.size]
         worker.execute {
             val bmp = runCatching { source.load() }.getOrNull() ?: return@execute
-            main.post { show(bmp, fade); onCaption?.invoke(source.caption) }
+            main.post {
+                val frame = Frame(bmp, source.caption)
+                current = frame
+                listeners.toList().forEach { it(frame, fade) }
+            }
         }
-    }
-
-    private fun show(bmp: Bitmap, fade: Long) {
-        val out = layers.getOrNull(front)
-        front = if (front == 0) 1 else 0
-        val into = layers[front]
-        into.animate().cancel()
-        into.setImageBitmap(bmp)
-        into.alpha = 0f
-        into.bringToFront() // fade the new image in on top, so there's no dark dip mid-crossfade
-        into.animate().alpha(1f).setDuration(fade).setInterpolator(DecelerateInterpolator())
-            .withEndAction { out?.apply { alpha = 0f; setImageDrawable(null) } }
-            .start()
     }
 
     private class Palette(
@@ -126,7 +119,25 @@ class Wallpaper(private val context: Context) {
         val hills: IntArray, val seed: Int,
     )
 
-    /** A layered, misty mountain landscape in the given palette. */
+    private val PALETTES = listOf(
+        // alpine lake
+        Palette(0xFF16324F.toInt(), 0xFF7FB2C9.toInt(), 0xFFE9F3F5.toInt(), 0.7f,
+            intArrayOf(0xFF4F7489.toInt(), 0xFF2F5161.toInt(), 0xFF1B3340.toInt(), 0xFF0E1C24.toInt()), 7),
+        // desert dusk
+        Palette(0xFF2B1C3A.toInt(), 0xFFD9886A.toInt(), 0xFFFFD39A.toInt(), 0.3f,
+            intArrayOf(0xFF8A4F4A.toInt(), 0xFF5E3540.toInt(), 0xFF3A2233.toInt(), 0xFF1C1220.toInt()), 11),
+        // misty morning
+        Palette(0xFF51677A.toInt(), 0xFFC9D3D9.toInt(), 0xFFFFFFFF.toInt(), 0.55f,
+            intArrayOf(0xFF8A9AA6.toInt(), 0xFF64747F.toInt(), 0xFF434F58.toInt(), 0xFF262E34.toInt()), 3),
+        // night ridge
+        Palette(0xFF060B1C.toInt(), 0xFF1E3A5C.toInt(), 0xFF7FB7FF.toInt(), 0.6f,
+            intArrayOf(0xFF1B2B45.toInt(), 0xFF132036.toInt(), 0xFF0C1526.toInt(), 0xFF060B14.toInt()), 19),
+        // forest valley
+        Palette(0xFF1F3A3A.toInt(), 0xFF9CC5A1.toInt(), 0xFFF3F7D9.toInt(), 0.4f,
+            intArrayOf(0xFF4E7A5A.toInt(), 0xFF335A43.toInt(), 0xFF1F3D2E.toInt(), 0xFF10221A.toInt()), 23),
+    )
+
+    /** A layered mountain landscape in the given palette. */
     private fun paint(p: Palette): Bitmap {
         val w = 960
         val h = 540
@@ -165,34 +176,61 @@ class Wallpaper(private val context: Context) {
         return bmp
     }
 
-    companion object {
-        private const val INTERVAL_MS = 3 * 60 * 1000L
-        private val EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
+    private fun decodeScaled(file: File, w: Int, h: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.path, bounds)
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= w && bounds.outHeight / (sample * 2) >= h) sample *= 2
+        return BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+}
 
-        private val PALETTES = listOf(
-            // alpine lake
-            Palette(0xFF16324F.toInt(), 0xFF7FB2C9.toInt(), 0xFFE9F3F5.toInt(), 0.7f,
-                intArrayOf(0xFF4F7489.toInt(), 0xFF2F5161.toInt(), 0xFF1B3340.toInt(), 0xFF0E1C24.toInt()), 7),
-            // desert dusk
-            Palette(0xFF2B1C3A.toInt(), 0xFFD9886A.toInt(), 0xFFFFD39A.toInt(), 0.3f,
-                intArrayOf(0xFF8A4F4A.toInt(), 0xFF5E3540.toInt(), 0xFF3A2233.toInt(), 0xFF1C1220.toInt()), 11),
-            // misty morning
-            Palette(0xFF51677A.toInt(), 0xFFC9D3D9.toInt(), 0xFFFFFFFF.toInt(), 0.55f,
-                intArrayOf(0xFF8A9AA6.toInt(), 0xFF64747F.toInt(), 0xFF434F58.toInt(), 0xFF262E34.toInt()), 3),
-            // night ridge
-            Palette(0xFF060B1C.toInt(), 0xFF1E3A5C.toInt(), 0xFF7FB7FF.toInt(), 0.6f,
-                intArrayOf(0xFF1B2B45.toInt(), 0xFF132036.toInt(), 0xFF0C1526.toInt(), 0xFF060B14.toInt()), 19),
-            // forest valley
-            Palette(0xFF1F3A3A.toInt(), 0xFF9CC5A1.toInt(), 0xFFF3F7D9.toInt(), 0.4f,
-                intArrayOf(0xFF4E7A5A.toInt(), 0xFF335A43.toInt(), 0xFF1F3D2E.toInt(), 0xFF10221A.toInt()), 23),
-        )
+/** Full-screen view of [WallpaperEngine]'s photo, crossfading between frames while attached. */
+class WallpaperLayer(context: Context) : FrameLayout(context) {
+    /** Called with each new frame (and the fade duration; 0 when shown instantly on attach). */
+    var onFrame: ((WallpaperEngine.Frame, Long) -> Unit)? = null
 
-        fun decodeScaled(file: File, w: Int, h: Int): Bitmap? {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.path, bounds)
-            var sample = 1
-            while (bounds.outWidth / (sample * 2) >= w && bounds.outHeight / (sample * 2) >= h) sample *= 2
-            return BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
+    private val layers = List(2) {
+        ImageView(context).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0f
+            addView(this, LayoutParams(-1, -1))
         }
+    }
+    private var front = -1
+    private var showing: Bitmap? = null
+    private val listener: (WallpaperEngine.Frame, Long) -> Unit = { frame, fade ->
+        show(frame.bitmap, fade)
+        onFrame?.invoke(frame, fade)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        WallpaperEngine.attach(context, listener)
+    }
+
+    override fun onDetachedFromWindow() {
+        WallpaperEngine.detach(listener)
+        super.onDetachedFromWindow()
+    }
+
+    private fun show(bmp: Bitmap, fade: Long) {
+        if (bmp === showing) return
+        showing = bmp
+        val out = layers.getOrNull(front)
+        front = if (front == 0) 1 else 0
+        val into = layers[front]
+        into.animate().cancel()
+        into.setImageBitmap(bmp)
+        into.bringToFront() // fade the new image in on top, so there's no dark dip mid-crossfade
+        if (fade <= 0) {
+            into.alpha = 1f
+            out?.apply { animate().cancel(); alpha = 0f; setImageDrawable(null) }
+            return
+        }
+        into.alpha = 0f
+        into.animate().alpha(1f).setDuration(fade).setInterpolator(DecelerateInterpolator())
+            .withEndAction { out?.apply { alpha = 0f; setImageDrawable(null) } }
+            .start()
     }
 }

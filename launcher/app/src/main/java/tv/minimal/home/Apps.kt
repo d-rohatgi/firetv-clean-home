@@ -1,8 +1,12 @@
 package tv.minimal.home
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.drawable.Drawable
+import android.os.Handler
+import android.os.Looper
 
 class AppEntry(
     val pkg: String,
@@ -43,7 +47,45 @@ object Apps {
 
     class Catalog(val favorites: List<AppEntry>, val others: List<AppEntry>)
 
-    fun load(context: Context): Catalog {
+    @Volatile
+    private var cached: Catalog? = null
+    private val listeners = LinkedHashSet<() -> Unit>()
+    private var watching = false
+
+    /** Bumped whenever installed apps change; views compare it to know when to rebuild. */
+    var version = 1
+        private set
+
+    /** The installed apps, loaded once and shared by every home screen in this process. */
+    fun catalog(context: Context): Catalog = cached ?: load(context.applicationContext).also { cached = it }
+
+    fun addListener(l: () -> Unit) = listeners.add(l)
+    fun removeListener(l: () -> Unit) = listeners.remove(l)
+
+    /** Starts listening for installs/uninstalls for the life of the process (idempotent). */
+    fun watch(context: Context) {
+        if (watching) return
+        watching = true
+        val handler = Handler(Looper.getMainLooper())
+        val invalidate = Runnable {
+            cached = null
+            version++
+            listeners.toList().forEach { it() }
+        }
+        context.applicationContext.registerReceiver(object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                handler.removeCallbacks(invalidate)
+                handler.postDelayed(invalidate, 600)
+            }
+        }, IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
+            addDataScheme("package")
+        })
+    }
+
+    private fun load(context: Context): Catalog {
         val pm = context.packageManager
         val found = LinkedHashMap<String, AppEntry>()
 

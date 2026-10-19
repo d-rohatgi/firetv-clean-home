@@ -154,6 +154,20 @@ class AppTile(context: Context, val app: AppEntry, cornerDp: Float) : View(conte
         onFocusChange?.invoke(gained)
     }
 
+    /** Jump straight to the resting look for the current focus state, skipping animations. */
+    fun settle() {
+        animate().cancel()
+        focusAnim?.cancel()
+        sheenAnim?.cancel()
+        val f = isFocused
+        scaleX = if (f) FOCUS_SCALE else 1f
+        scaleY = scaleX
+        translationZ = if (f) context.dp(12) else 0f
+        focusAmount = if (f) 1f else 0f
+        sheen = -1f
+        invalidate()
+    }
+
     override fun drawableStateChanged() {
         super.drawableStateChanged()
         if (!isFocused) return
@@ -235,6 +249,17 @@ class Pill(context: Context, iconRes: Int, text: String) : LinearLayout(context)
         label.setTextColor(fg)
     }
 
+    /** Jump straight to the resting look for the current focus state, skipping animations. */
+    fun settle() {
+        animate().cancel()
+        colorAnim?.cancel()
+        val s = if (isFocused) 1.08f else 1f
+        scaleX = s
+        scaleY = s
+        current = if (isFocused) Color.WHITE else IDLE
+        bg.setColor(current)
+    }
+
     companion object {
         private const val IDLE = 0x40000000
     }
@@ -306,6 +331,9 @@ class GlideFrame(
             start()
         }
     }
+
+    /** Complete any glide in progress immediately. */
+    fun finishGlide() = anim?.end()
 
     private fun apply(v: Int) = if (horizontal) scrollTo(v, 0) else scrollTo(0, v)
 }
