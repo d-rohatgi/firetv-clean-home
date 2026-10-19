@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Home</string>
+    <string name="redirect_label">Home button redirect</string>
+    <string name="redirect_description">Opens your Home launcher whenever the Amazon home screen appears.</string>
+</resources>
